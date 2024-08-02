@@ -1,0 +1,304 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      message = FALSE,
+                      warning = FALSE,
+                      eval = TRUE,
+                      include = TRUE)
+```
+
+#Load package
+```{r}
+library(Seurat)
+library(ggplot2)
+library(cowplot)
+library(Matrix)
+library(dplyr)
+library(celldex)
+library(SingleR)
+library(celldex)
+library(SummarizedExperiment)
+```
+
+#Integrated data
+```{r}
+setwd("C:/Users/22418/Desktop/singleCell/Sourcedata")
+stringsAsFactors = F
+Healthy_control<- Read10X("Healthy_control/")
+CUA_Patient3 <- Read10X('CUA_patient3/')
+CUA_Patient3_treated <- Read10X('CUA_patient3_treated/')
+
+
+#Create Seurat，standardization and looking for high expressing mutated genes
+Control <- CreateSeuratObject(
+  Healthy_control,
+  project = "Control", 
+  min.cells = 10,
+  min.features = 200)
+CUA <- CreateSeuratObject(
+  CUA_Patient3,
+  project = "CUA", 
+  min.cells = 10,
+  min.features = 200)
+CUA_treated <- CreateSeuratObject(
+  CUA_Patient3_treated,
+  project = "CUA_treated", 
+  min.cells = 10,
+  min.features = 200)
+
+Control[["percent.mt"]] <- PercentageFeatureSet(Control, pattern = "^MT-")
+CUA[["percent.mt"]] <- PercentageFeatureSet(CUA, pattern = "^MT-")
+CUA_treated[["percent.mt"]] <- PercentageFeatureSet(CUA_treated, pattern = "^MT-")
+
+
+Control <- subset(Control, 
+                               subset = 
+                                 nFeature_RNA > 500 & 
+                                 nCount_RNA > 1000 & 
+                                 nCount_RNA < 20000 &
+                                 percent.mt < 10)
+CUA <- subset(CUA, 
+                               subset = 
+                                 nFeature_RNA > 500 & 
+                                 nCount_RNA > 1000 & 
+                                 nCount_RNA < 20000 &
+                                 percent.mt < 10)
+
+CUA_treated <- subset(CUA_treated, 
+                               subset = 
+                                 nFeature_RNA > 500 & 
+                                 nCount_RNA > 1000 & 
+                                 nCount_RNA < 20000 &
+                                 percent.mt < 10)
+Control<-NormalizeData(Control,verbose = FALSE)
+Control<- FindVariableFeatures(Control, selection.method = "vst",nfeatures = 1000)
+CUA<-NormalizeData(CUA,verbose = FALSE)
+CUA<- FindVariableFeatures(CUA, selection.method = "vst",nfeatures = 1000)
+CUA_treated<-NormalizeData(CUA_treated,verbose = FALSE)
+CUA_treated<- FindVariableFeatures(CUA_treated, selection.method = "vst",nfeatures = 1000)
+
+#Integration
+combined.anchors<- FindIntegrationAnchors(object.list = c(Control,CUA,CUA_treated), dims = 1:30)
+combined <- IntegrateData(anchorset = combined.anchors, dims = 1:30)
+```
+
+#Normalize Data
+```{r}
+combined <- ScaleData(combined, verbose = FALSE)
+```
+
+#PCA and results
+```{r}
+#PCA
+combined <- RunPCA(combined, npcs = 50, verbose = FALSE)
+
+#PCA result
+DimPlot(combined, reduction = "pca", split.by = "orig.ident")
+
+#PCA result
+ElbowPlot(combined, ndim=50,reduction="pca")
+```
+
+#Set the dimensions of an array, matrix or data frame.
+```{r}
+dim.use <- 1:15
+```
+
+#PCA、UMAP、TSNE
+```{r}
+#UMAP
+combined <- FindNeighbors(combined, dims = dim.use)
+combined <- FindClusters(combined, resolution = 0.9)
+combined <- RunUMAP(combined, dims = 1:15)
+combined <- RunTSNE(combined, dims = 1:15)
+DimPlot(object = combined,reduction = "umap" ,pt.size=1,label = T, split.by = "orig.ident")
+DimPlot(object = combined,reduction = "tsne" ,pt.size=1,label = T, split.by = "orig.ident")
+
+#Plot
+Plot1 <- DimPlot(combined,reduction = 'pca',label = TRUE)
+Plot2 <- DimPlot(combined,reduction = 'tsne',label = TRUE)
+Plot3 <- DimPlot(combined,reduction = 'umap',label = TRUE)
+Plot1+Plot2+Plot3
+
+DimPlot(object = combined,reduction = "umap" ,pt.size=1,label = T, split.by = "orig.ident")
+DimPlot(object = combined,reduction = "umap" ,pt.size=1,label = T)
+
+```
+
+#Calculate marker genes
+```{r}
+all.markers<-FindAllMarkers(combined, only.pos = TRUE, 
+                            min.pct = 0.25, logfc.threshold = 0.2)
+marker.sig <- all.markers %>% filter(p_val_adj <= 0.05)
+write.table(all.markers,file = 'marker.xls',sep='\t',row.names = F,quote = F)
+```
+
+#Heatmap shows Top marker genes
+```{r}
+top10 <- marker.sig %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+combined <- ScaleData(combined, features =  rownames(combined))
+DoHeatmap(combined,features = top10$gene,size=3)
+```
+#singleR
+```{r}
+load("D:/BaiduNetdiskDownload/HumanPrimaryCellAtlas_hpca.se_human.RData")
+combined_for_singler <- GetAssayData(combined,slot = "data")#获取标准化矩阵
+combined.hesc <- SingleR(test = combined_for_singler,
+                     ref =hpca.se,
+                     labels =hpca.se$label.main)
+celltype <- data.frame(seurat=combined@meta.data$seurat_clusters,predict=combined.hesc$labels)
+table(celltype[,1:2])
+renams <- as.data.frame(table(celltype[,1:2]))
+renams <- renams%>%group_by(seurat)%>%top_n(n=1,wt=Freq)#找到每个聚类注释比例最高的对应类型
+renams <- renams[order(renams$seurat),]$predict#找到聚类对应的预测类型
+print(renams)
+new.cluster.ids <- as.character(renams)
+names(new.cluster.ids) <- levels(combined)
+combined <- RenameIdents(combined,new.cluster.ids)
+combined$celltype <- combined@active.ident
+combined$sample <- combined$orig.ident
+DimPlot(combined,reduction = "umap",label = T,pt.size = 0.5)
+DimPlot(combined,reduction = "tsne",label = T,pt.size = 0.5)
+DimPlot(combined,reduction = "tsne",label = T,pt.size = 0.5,group.by = "sample")
+DimPlot(combined,reduction = "umap",label = T,pt.size = 0.5,group.by = "sample")
+```
+#marker
+```{r}
+Idents(combined) <- combined$seurat_clusters
+DefaultAssay(combined) <- 'RNA'
+BC <- c("CD19","CD79A","CD79B","MS4A1","BANK1")
+TC <- c("CD3D","CD3E","CD3G","CD8A","CD8B","CD4","IL7R")
+mono <- c("CD14","CTSS","CD68","FCGR3A","S100A9","CDKN1C")
+NK <- c("NCAM1","KLRB1","NKG7","GNLY","GZMB","PRF1")
+neutro <- c("FCGR3B","CXCR2","ITGAM","LCN2","TNFRSF10C","MNDA")
+megakaryocytes <- c("PPBP","PF4")
+ery <- c("HBB")
+markers <- c(BC,TC,mono,NK,neutro,megakaryocytes,ery)
+DotPlot(combined,features = unique(markers),group.by = "seurat_clusters")+
+  RotatedAxis()+
+  scale_x_discrete("")+
+  scale_y_discrete("")
+```
+
+
+#Cell type identification(Figure 5A)
+```{r}
+Monocyte=c(2,4,5,8,11,15,18,19,11,23)
+T_cell=c(0,1,3,7,9,10)
+B_cell=c(13)
+NK_cell=c(6,12,16,20)
+Neutrophil=c(17)
+Megakaryocyte=c(21,22)
+Erythroid_like=c(14)
+current.cluster.ids <- c(Monocyte,
+                        T_cell,
+                        B_cell,
+                        NK_cell,
+                        Neutrophil,
+                        Megakaryocyte,
+                        Erythroid_like)
+new.cluster.ids <- c(rep("Monocyte",length(Monocyte)),
+                     rep("T_cell",length(T_cell)),
+                     rep("B_cell",length(B_cell)),
+                     rep("NK_cell",length(NK_cell)),
+                     rep("Neutrophil",length(Neutrophil)),
+                     rep("Megakaryocyte",length(Megakaryocyte)),
+                     rep("Erythroid_like",length(Erythroid_like))
+                     )    
+combined@meta.data$celltype <- plyr::mapvalues(x = as.integer(as.character(combined@meta.data$seurat_clusters)), from = current.cluster.ids, to = new.cluster.ids)
+table(combined@meta.data$celltype)
+plotCB=as.data.frame(combined@meta.data)
+DimPlot(combined, reduction = "umap", group.by = "celltype", pt.size=0.3,label = T)
+Idents(combined)<-combined$celltype
+DimPlot(combined, reduction = "umap", split.by = "orig.ident", pt.size=0.3,label = T)
+```
+
+
+#GO analysis
+```{r}
+library(openxlsx)
+library(ggplot2)
+library(stringr)
+library(enrichplot)
+library(clusterProfiler)
+library(DOSE)
+library(ggnewscale)
+library(circlize)
+library(ComplexHeatmap)
+Idents(combined) <- "celltype"
+mydeg <- FindAllMarkers(combined, only.pos = TRUE, 
+                            min.pct = 0.25, logfc.threshold = 0.2)
+mydeg <- filter(mydeg,cluster=="Megakaryocyte")
+
+GO_database <- 'org.Hs.eg.db'
+#gene ID transition
+gene <- bitr(mydeg$gene,fromType = 'SYMBOL',toType = 'ENTREZID',OrgDb = GO_database)
+
+GO<-enrichGO( gene$ENTREZID,#GO analysis
+              OrgDb = GO_database,
+              keyType = "ENTREZID",
+              ont = "ALL",
+              pvalueCutoff = 0.05,#set p value
+              qvalueCutoff = 0.05,#set q value
+              readable = T)
+```
+
+#Dotplot(Figure 5B)
+```{r}
+dotplot(GO, showCategory=10,split="ONTOLOGY")+facet_grid(ONTOLOGY~., scale="free")
+```
+
+
+
+#Dotplot of THBS1 expression (Figure 5C)
+```{r}
+DefaultAssay(combined) <- "integrated"
+mk <-c("THBS1","rna_TGFB1")
+DotPlot(combined,features = mk)+coord_flip()+
+  theme_bw()+
+  theme(panel.grid = element_blank(),axis.text.x = element_text(hjust = 1,vjust = 0.5))+
+  labs(x=NULL,y=NULL)+guides(size=guide_legend(order = 3))+
+  scale_color_gradientn(values = seq(0,1,0.2),colours = c("#330066","#336699","#66cc66",'#ffdc80',"#ffcc33"))
+```
+
+
+#Comparision (Figure 5D)
+```{r}
+library(ggpubr)
+
+exprs <- as.data.frame(t(GetAssayData(combined, slot = 'data', assay = 'RNA')))
+metadata <- combined@meta.data
+
+ident <- cbind(exprs, metadata)
+
+### Set group
+my_comparisons=list( c("Control", "CUA"), c("CUA", "CUA_treated"), c("Control","CUA_treated"))
+### Violinplot
+p4<-ggviolin(ident, x='orig.ident', y='THBS1', 
+         color = "orig.ident",
+         fill="orig.ident",
+         palette =c("#76ab20","#ec7970","#43c4c6"),#Set color
+         add = "boxplot",#添加箱线图
+         add.params = list(color="white"),
+         xlab = F, 
+         legend = 'right'
+         )+
+  stat_compare_means(method="wilcox.test",comparisons = my_comparisons,label = "p.signif",label.y = c(3.6,3.7,4)) 
+p4
+p5<-ggviolin(ident, x='orig.ident', y='TGFB1', 
+         color = "orig.ident",
+         fill="orig.ident",
+         palette =c("#76ab20","#ec7970","#43c4c6"),#Set color
+         add = "boxplot",#添加箱线图
+         add.params = list(color="white"),
+         xlab = F, 
+         legend = 'right'
+         )+
+  stat_compare_means(method="wilcox.test",comparisons = my_comparisons,label = "p.signif",label.y = c(4.5,4.7,5)) 
+p5
+```
+
